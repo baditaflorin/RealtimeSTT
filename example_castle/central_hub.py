@@ -281,6 +281,96 @@ DISPLAY_TEMPLATE = """
 </html>
 """
 
+# --- Main Server Logic ---
+
+class CentralHub:
+    def __init__(self, websocket_port=9000, web_port=8000):
+        self.websocket_port = websocket_port
+        self.web_port = web_port
+
+    def run(self):
+        """Starts both the WebSocket and Web servers."""
+        # Run WebSocket server in a separate thread
+        websocket_thread = threading.Thread(target=self.start_websocket_server, daemon=True)
+        websocket_thread.start()
+
+        # Run Flask-SocketIO server (this is the main blocking call)
+        logger.info(f"Starting web server MODIFIED on http://0.0.0.0:{self.web_port}")
+        socketio.run(app, host='0.0.0.0', port=self.web_port, debug=False)
+
+    def start_websocket_server(self):
+        """Initializes and runs the asyncio WebSocket server."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.websocket_server_logic())
+
+    async def websocket_server_logic(self):
+        """The core logic for the websockets server."""
+        async def connection_handler(websocket, path=None):
+            # Handle both old and new websockets library versions
+            if path is None and hasattr(websocket, 'path'):
+                path = websocket.path
+            elif path is None:
+                path = '/'
+
+            client_address = websocket.remote_address
+            room_name = None
+            logger.info(f"Room client connecting from {client_address} on path '{path}'...")
+            try:
+                async for message in websocket:
+                    try:
+                        data = json.loads(message)
+                        current_room_name = data.get('room')
+                        if not current_room_name:
+                            continue
+
+                        if not room_name:
+                            room_name = current_room_name
+                            logger.info(f"Connection from {client_address} identified as Room: '{room_name}'")
+
+                        self.process_room_message(data)
+                    except json.JSONDecodeError:
+                        logger.error(f"Invalid JSON from {client_address}: {message}")
+                    except Exception as e:
+                        logger.error(f"Error processing message from {room_name}: {e}", exc_info=True)
+            except websockets.exceptions.ConnectionClosed:
+                logger.info(f"Room client {client_address} (Room: {room_name}) disconnected.")
+            finally:
+                if room_name:
+                    self.process_room_message({'type': 'disconnection', 'room': room_name})
+
+        async with websockets.serve(connection_handler, "0.0.0.0", self.websocket_port):
+            logger.info(f"WebSocket server listening on port {self.websocket_port}")
+            await asyncio.Future()  # Run forever
+
+    def process_room_message(self, data):
+        """Processes messages and emits to the web interface via SocketIO."""
+        message_type = data.get('type')
+        room_name = data.get('room')
+
+        with _lock:
+            if message_type == 'connection':
+                connected_rooms[room_name] = {'status': 'connected', 'last_seen': time.time()}
+            elif message_type == 'disconnection':
+                if room_name in connected_rooms:
+                    connected_rooms[room_name]['status'] = 'disconnected'
+            elif message_type in ['partial', 'final']:
+                connected_rooms[room_name] = {'status': 'connected', 'last_seen': time.time()}
+                if message_type == 'final':
+                    transcription_history[room_name].append(data)
+                    room_stats[room_name]['total_transcriptions'] += 1
+
+        # Emit outside the lock to avoid holding it during network I/O
+        if message_type == 'connection':
+            socketio.emit('room_connected', {'room': room_name})
+            logger.info(f"Emitted 'room_connected' for '{room_name}'")
+        elif message_type == 'disconnection':
+            socketio.emit('room_disconnected', {'room': room_name})
+            logger.info(f"Emitted 'room_disconnected' for '{room_name}'")
+        elif message_type in ['partial', 'final']:
+            socketio.emit('transcription_update', data)
+
+
 # --- Flask-SocketIO Routes ---
 @app.route('/')
 def index():
