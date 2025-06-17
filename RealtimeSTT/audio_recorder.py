@@ -40,7 +40,7 @@ import faster_whisper
 import openwakeword
 import collections
 import numpy as np
-import pvporcupine
+# import pvporcupine
 import traceback
 import threading
 import webrtcvad
@@ -737,7 +737,20 @@ class AudioToTextRecorder:
         self.parent_stdout_pipe, child_stdout_pipe = SafePipe()
 
         # Set device for model
-        self.device = "cuda" if self.device == "cuda" and torch.cuda.is_available() else "cpu"
+
+        # Check for NVIDIA CUDA
+        if device == "cuda" and torch.cuda.is_available():
+            self.device = "cuda"
+            logger.info("CUDA is available, using GPU.")
+        # Check for Apple's Metal Performance Shaders (MPS) for M-series Macs
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+            logger.info("Apple Metal is available, using GPU (mps).")
+        # Fallback to CPU
+        else:
+            self.device = "cpu"
+            logger.info("No GPU detected, using CPU.")
+
 
         self.transcript_process = self._start_thread(
             target=AudioToTextRecorder._transcription_worker,

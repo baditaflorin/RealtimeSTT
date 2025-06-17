@@ -1,4 +1,14 @@
 if __name__ == '__main__':
+    import os
+    os.environ['CT2_USE_MPS'] = '1'
+    os.environ['CT2_FORCE_DEVICE'] = 'mps'
+    # Force MPS before importing anything else
+    import torch
+    if torch.backends.mps.is_available():
+        torch.set_default_device('mps')
+        print("Forced torch to use MPS device")
+    import whisper
+
     print("Starting server, please wait...")
     from RealtimeSTT import AudioToTextRecorder
     import asyncio
@@ -44,27 +54,58 @@ if __name__ == '__main__':
                 })), main_loop)
         print(f"\r{text}", flush=True, end='')
 
+    # recorder_config = {
+    #     'spinner': False,
+    #     'use_microphone': False,
+    #     'model': 'large-v2',
+    #     # 'model': 'tiny.en',
+    #     'level': logging.INFO,  # <<< ADD THIS LINE
+    #     'device': 'mps',  # ← Add this line (RealtimeSTT will auto-detect MPS)
+    #     'language': 'en',
+    #     'silero_sensitivity': 0.4,
+    #     'webrtc_sensitivity': 2,
+    #     'post_speech_silence_duration': 0.7,
+    #     'min_length_of_recording': 0,
+    #     'min_gap_between_recordings': 0,
+    #     'enable_realtime_transcription': True,
+    #     'realtime_processing_pause': 0,
+    #     'realtime_model_type': 'large-v2',
+    #     'on_realtime_transcription_stabilized': text_detected,
+    # }
+
     recorder_config = {
         'spinner': False,
         'use_microphone': False,
-        'model': 'large-v2',
+        'model': 'large-v3-turbo',
+        'device': 'cuda',  # This will auto-detect MPS with original whisper
+        'level': logging.INFO,
         'language': 'en',
         'silero_sensitivity': 0.4,
         'webrtc_sensitivity': 2,
         'post_speech_silence_duration': 0.7,
         'min_length_of_recording': 0,
         'min_gap_between_recordings': 0,
-        'enable_realtime_transcription': True,
+        'enable_realtime_transcription': False,  # Disable for now
         'realtime_processing_pause': 0,
-        'realtime_model_type': 'tiny.en',
+        'compute_type': 'auto',  # Add this line
+
+        # Remove the realtime_model_type line
         'on_realtime_transcription_stabilized': text_detected,
     }
 
     def run_recorder():
         global recorder, main_loop, is_running
+        import torch  # ← Move this line to the top
+
         print("Initializing RealtimeSTT...")
         recorder = AudioToTextRecorder(**recorder_config)
         print("RealtimeSTT initialized")
+
+        # Add these debug lines:
+        print(f"Recorder device: {getattr(recorder, 'device', 'unknown')}")
+        print(f"Torch MPS available: {torch.backends.mps.is_available()}")
+        print(f"Torch default device: {torch.get_default_device() if hasattr(torch, 'get_default_device') else 'unknown'}")
+
         recorder_ready.set()
 
         # Loop indefinitely checking for full sentence output.
@@ -126,27 +167,37 @@ if __name__ == '__main__':
                 client_websocket = None
 
     async def main():
+        """
+        Starts the recorder thread and the WebSocket server concurrently.
+        """
         global main_loop
         main_loop = asyncio.get_running_loop()
 
-        recorder_thread = threading.Thread(target=run_recorder)
-        recorder_thread.daemon = True
+        # Start the recorder in a completely separate background thread.
+        # The asyncio loop will NOT wait for it. It runs in parallel.
+        print("Starting recorder thread in background...")
+        recorder_thread = threading.Thread(target=run_recorder, daemon=True)
         recorder_thread.start()
-        recorder_ready.wait()
 
-        print("Server started. Press Ctrl+C to stop the server.")
-        async with websockets.serve(echo, "localhost", 8001):
-            try:
-                await asyncio.Future()  # run forever
-            except asyncio.CancelledError:
-                print("\nShutting down server...")
+        # Start the WebSocket server immediately.
+        async with websockets.serve(echo, "0.0.0.0", 9001):
+            print("Server started and listening on ws://0.0.0.0:9001. Press Ctrl+C to stop.")
+            # Keep the server running forever.
+            await asyncio.Future()
 
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        is_running = False
-        recorder.stop()
-        recorder.shutdown()
-    finally:
-        if recorder:
-            del recorder
+
+        # This is the main entry point for the script
+    if __name__ == '__main__':
+        # All of your existing functions (text_detected, run_recorder, etc.)
+        # and the recorder_config dictionary should remain above this block.
+
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            print("\nShutdown requested by user.")
+        finally:
+            # Cleanly shut down the recorder
+            is_running = False
+            if recorder:
+                recorder.shutdown()
+            print("Server shutdown complete.")

@@ -2,8 +2,9 @@ services:
   rtstt:
     build:
       context: .
-      target: gpu # or cpu
+      target: cpu # or cpu
     image: rtstt
+#    platform: linux/amd64  # <--- ADD THIS LINE
     container_name: rtstt
     volumes:
       # - ./RealtimeSTT:/app/RealtimeSTT
@@ -13,11 +14,11 @@ services:
       - "9001:9001"
 
     # if 'gpu' target
-    deploy:
-      resources:
-        reservations:
-          devices:
-          - capabilities: ["gpu"]
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#          - capabilities: ["gpu"]
   nginx:
     image: nginx:latest
     container_name: nginx_web
