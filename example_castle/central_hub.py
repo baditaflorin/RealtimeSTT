@@ -104,6 +104,14 @@ DISPLAY_TEMPLATE = """
         .transcription-area::-webkit-scrollbar { width: 8px; }
         .transcription-area::-webkit-scrollbar-track { background: rgba(255,255,255,0.1); }
         .transcription-area::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.3); border-radius: 4px; }
+        
+        /* NEW - Hide/Delete functionality */
+        .hidden { display: none !important; }
+        .action-btn { 
+            position: absolute; top: 8px; background: transparent; border: 0; 
+            color: #fff; font-size: 1rem; cursor: pointer; opacity: 0.7; 
+        }
+        .action-btn:hover { opacity: 1; }
     </style>
 </head>
 <body>
@@ -177,6 +185,9 @@ DISPLAY_TEMPLATE = """
                     <div class="room-header">
                         <div class="connection-indicator" id="status-${safeRoomId}"></div>
                         <h2>${roomName}</h2>
+                        <!-- NEW control buttons -->
+                        <button class="action-btn" style="right:70px" onclick="hideRoom('${roomName}')">👁</button>
+                        <button class="action-btn" style="right:38px" onclick="deleteRoom('${roomName}')">🗑</button>
                         <div class="room-status" id="stats-${safeRoomId}">Waiting for audio...</div>
                     </div>
                     <div class="transcription-area" id="transcriptions-${safeRoomId}">
@@ -184,8 +195,8 @@ DISPLAY_TEMPLATE = """
                     </div>`;
                 
                 container.appendChild(panel);
-                rooms[roomName] = { panel, transcriptionArea: panel.querySelector('.transcription-area') };
-                document.getElementById('total-rooms').textContent = `Rooms: ${Object.keys(rooms).length}`;
+                rooms[roomName] = { panel, transcriptionArea: panel.querySelector('.transcription-area'), hidden: false };
+                updateRoomCounter();
             }
             
             function updateRoomStatus(roomName, status) {
@@ -228,6 +239,34 @@ DISPLAY_TEMPLATE = """
                     statsElement.textContent = isPartial ? 'Speaking...' : `Last: ${new Date(data.timestamp * 1000).toLocaleTimeString()}`;
                 }
             }
+
+            /********* NEW — HIDE / DELETE helpers *********/
+            function updateRoomCounter() {
+                const visibleRooms = Object.keys(rooms).filter(r => !rooms[r].hidden).length;
+                document.getElementById('total-rooms').textContent = `Rooms: ${visibleRooms}`;
+            }
+
+            window.hideRoom = function(roomName) {
+                const panel = document.getElementById(getSafeRoomId(roomName));
+                if (!panel) return;
+                panel.classList.toggle('hidden');
+                rooms[roomName].hidden = panel.classList.contains('hidden');
+                updateRoomCounter();
+            };
+
+            window.deleteRoom = function(roomName) {
+                if (!confirm(`Delete room "${roomName}" and its transcripts?`)) return;
+                socket.emit('delete_room', { room: roomName });
+            };
+
+            /********* Socket reaction when another client deletes *********/
+            socket.on('room_deleted', data => {
+                const roomName = data.room;
+                const panel = document.getElementById(getSafeRoomId(roomName));
+                if (panel) panel.remove();
+                delete rooms[roomName];
+                updateRoomCounter();
+            });
 
             // --- Control Button Functions ---
             window.clearAll = function() {
@@ -288,30 +327,35 @@ class CentralHub:
         self.websocket_port = websocket_port
         self.web_port = web_port
 
-    def run(self):
+    def run(self, ssl_context=None): # Add ssl_context parameter
         """Starts both the WebSocket and Web servers."""
         # Run WebSocket server in a separate thread
         websocket_thread = threading.Thread(target=self.start_websocket_server, daemon=True)
         websocket_thread.start()
 
-        # Run Flask-SocketIO server (this is the main blocking call)
-        logger.info(f"Starting web server MODIFIED on http://0.0.0.0:{self.web_port}")
-        socketio.run(app, host='0.0.0.0', port=self.web_port, debug=False)
+        # Run Flask-SocketIO server with SSL
+        logger.info(f"Starting web server MODIFIED on https://0.0.0.0:{self.web_port}")
+        socketio.run(app, host='0.0.0.0', port=self.web_port, debug=False, ssl_context=ssl_context)
 
     def start_websocket_server(self):
         """Initializes and runs the asyncio WebSocket server."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(self.websocket_server_logic())
 
-    async def websocket_server_logic(self):
+        # Create a secure websocket server context
+        ssl_server_context = None
+        if ssl_context:
+            import ssl
+            ssl_server_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            ssl_server_context.load_cert_chain(certfile=ssl_context[0], keyfile=ssl_context[1])
+
+        loop.run_until_complete(self.websocket_server_logic(ssl_server_context))
+
+    async def websocket_server_logic(self, ssl_context=None):
         """The core logic for the websockets server."""
         async def connection_handler(websocket, path=None):
-            # Handle both old and new websockets library versions
-            if path is None and hasattr(websocket, 'path'):
-                path = websocket.path
-            elif path is None:
-                path = '/'
+            if path is None and hasattr(websocket, 'path'): path = websocket.path
+            elif path is None: path = '/'
 
             client_address = websocket.remote_address
             room_name = None
@@ -321,54 +365,39 @@ class CentralHub:
                     try:
                         data = json.loads(message)
                         current_room_name = data.get('room')
-                        if not current_room_name:
-                            continue
-
+                        if not current_room_name: continue
                         if not room_name:
                             room_name = current_room_name
                             logger.info(f"Connection from {client_address} identified as Room: '{room_name}'")
-
                         self.process_room_message(data)
-                    except json.JSONDecodeError:
-                        logger.error(f"Invalid JSON from {client_address}: {message}")
-                    except Exception as e:
-                        logger.error(f"Error processing message from {room_name}: {e}", exc_info=True)
-            except websockets.exceptions.ConnectionClosed:
-                logger.info(f"Room client {client_address} (Room: {room_name}) disconnected.")
+                    except json.JSONDecodeError: logger.error(f"Invalid JSON from {client_address}: {message}")
+                    except Exception as e: logger.error(f"Error processing message from {room_name}: {e}", exc_info=True)
+            except websockets.exceptions.ConnectionClosed: logger.info(f"Room client {client_address} (Room: {room_name}) disconnected.")
             finally:
-                if room_name:
-                    self.process_room_message({'type': 'disconnection', 'room': room_name})
+                if room_name: self.process_room_message({'type': 'disconnection', 'room': room_name})
 
-        async with websockets.serve(connection_handler, "0.0.0.0", self.websocket_port):
-            logger.info(f"WebSocket server listening on port {self.websocket_port}")
-            await asyncio.Future()  # Run forever
+        async with websockets.serve(connection_handler, "0.0.0.0", self.websocket_port, ssl=ssl_context):
+            logger.info(f"Secure WebSocket server listening on port {self.websocket_port}")
+            await asyncio.Future()
 
     def process_room_message(self, data):
-        """Processes messages and emits to the web interface via SocketIO."""
-        message_type = data.get('type')
-        room_name = data.get('room')
-
+        message_type, room_name = data.get('type'), data.get('room')
         with _lock:
-            if message_type == 'connection':
-                connected_rooms[room_name] = {'status': 'connected', 'last_seen': time.time()}
+            if message_type == 'connection': connected_rooms[room_name] = {'status': 'connected', 'last_seen': time.time()}
             elif message_type == 'disconnection':
-                if room_name in connected_rooms:
-                    connected_rooms[room_name]['status'] = 'disconnected'
+                if room_name in connected_rooms: connected_rooms[room_name]['status'] = 'disconnected'
             elif message_type in ['partial', 'final']:
                 connected_rooms[room_name] = {'status': 'connected', 'last_seen': time.time()}
                 if message_type == 'final':
                     transcription_history[room_name].append(data)
                     room_stats[room_name]['total_transcriptions'] += 1
-
-        # Emit outside the lock to avoid holding it during network I/O
         if message_type == 'connection':
             socketio.emit('room_connected', {'room': room_name})
             logger.info(f"Emitted 'room_connected' for '{room_name}'")
         elif message_type == 'disconnection':
             socketio.emit('room_disconnected', {'room': room_name})
             logger.info(f"Emitted 'room_disconnected' for '{room_name}'")
-        elif message_type in ['partial', 'final']:
-            socketio.emit('transcription_update', data)
+        elif message_type in ['partial', 'final']: socketio.emit('transcription_update', data)
 
 
 # --- Flask-SocketIO Routes ---
@@ -394,8 +423,23 @@ def handle_room_status_request():
             if room_data.get('status') == 'connected':
                 emit('room_connected', {'room': room_name})
 
+# NEW - Delete room handler
+@socketio.on('delete_room')
+def handle_delete_room(data):
+    room = data.get('room')
+    if not room:
+        return
 
-# --- Main Execution ---
+    with _lock:
+        connected_rooms.pop(room, None)
+        transcription_history.pop(room, None)
+        room_stats.pop(room, None)
+
+    # Tell every dashboard a room vanished
+    socketio.emit('room_deleted', {'room': room})
+    logger.info(f"Room '{room}' deleted by client request.")
+
+
 # --- Main Execution ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Central transcription hub")
@@ -405,85 +449,6 @@ if __name__ == "__main__":
 
     # Define the SSL context using the generated files
     ssl_context = ('cert.pem', 'key.pem')
-
-    # The CentralHub class doesn't need to change, but how we run socketio does.
-    # We will modify the CentralHub's run method slightly.
-    class CentralHub:
-        def __init__(self, websocket_port=9000, web_port=8000):
-            self.websocket_port = websocket_port
-            self.web_port = web_port
-
-        def run(self, ssl_context=None): # Add ssl_context parameter
-            """Starts both the WebSocket and Web servers."""
-            # Run WebSocket server in a separate thread
-            websocket_thread = threading.Thread(target=self.start_websocket_server, daemon=True)
-            websocket_thread.start()
-
-            # Run Flask-SocketIO server with SSL
-            logger.info(f"Starting web server MODIFIED on https://0.0.0.0:{self.web_port}")
-            socketio.run(app, host='0.0.0.0', port=self.web_port, debug=False, ssl_context=ssl_context)
-
-        def start_websocket_server(self):
-            """Initializes and runs the asyncio WebSocket server."""
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-            # Create a secure websocket server context
-            ssl_server_context = None
-            if ssl_context:
-                import ssl
-                ssl_server_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-                ssl_server_context.load_cert_chain(certfile=ssl_context[0], keyfile=ssl_context[1])
-
-            loop.run_until_complete(self.websocket_server_logic(ssl_server_context))
-
-        async def websocket_server_logic(self, ssl_context=None):
-            """The core logic for the websockets server."""
-            async def connection_handler(websocket, path=None):
-                if path is None and hasattr(websocket, 'path'): path = websocket.path
-                elif path is None: path = '/'
-
-                client_address = websocket.remote_address
-                room_name = None
-                logger.info(f"Room client connecting from {client_address} on path '{path}'...")
-                try:
-                    async for message in websocket:
-                        try:
-                            data = json.loads(message)
-                            current_room_name = data.get('room')
-                            if not current_room_name: continue
-                            if not room_name:
-                                room_name = current_room_name
-                                logger.info(f"Connection from {client_address} identified as Room: '{room_name}'")
-                            self.process_room_message(data)
-                        except json.JSONDecodeError: logger.error(f"Invalid JSON from {client_address}: {message}")
-                        except Exception as e: logger.error(f"Error processing message from {room_name}: {e}", exc_info=True)
-                except websockets.exceptions.ConnectionClosed: logger.info(f"Room client {client_address} (Room: {room_name}) disconnected.")
-                finally:
-                    if room_name: self.process_room_message({'type': 'disconnection', 'room': room_name})
-
-            async with websockets.serve(connection_handler, "0.0.0.0", self.websocket_port, ssl=ssl_context):
-                logger.info(f"Secure WebSocket server listening on port {self.websocket_port}")
-                await asyncio.Future()
-
-        def process_room_message(self, data):
-            message_type, room_name = data.get('type'), data.get('room')
-            with _lock:
-                if message_type == 'connection': connected_rooms[room_name] = {'status': 'connected', 'last_seen': time.time()}
-                elif message_type == 'disconnection':
-                    if room_name in connected_rooms: connected_rooms[room_name]['status'] = 'disconnected'
-                elif message_type in ['partial', 'final']:
-                    connected_rooms[room_name] = {'status': 'connected', 'last_seen': time.time()}
-                    if message_type == 'final':
-                        transcription_history[room_name].append(data)
-                        room_stats[room_name]['total_transcriptions'] += 1
-            if message_type == 'connection':
-                socketio.emit('room_connected', {'room': room_name})
-                logger.info(f"Emitted 'room_connected' for '{room_name}'")
-            elif message_type == 'disconnection':
-                socketio.emit('room_disconnected', {'room': room_name})
-                logger.info(f"Emitted 'room_disconnected' for '{room_name}'")
-            elif message_type in ['partial', 'final']: socketio.emit('transcription_update', data)
 
     # --- Create Hub and Run ---
     hub = CentralHub(websocket_port=args.websocket_port, web_port=args.web_port)

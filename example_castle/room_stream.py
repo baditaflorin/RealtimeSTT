@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 class RoomTranscriptionServer:
-    def __init__(self, room_name, central_hub_url, whisper_model="base"):
+    def __init__(self, room_name, central_hub_url, whisper_model="medium"):
         self.room_name = room_name
         self.central_hub_url = central_hub_url
         self.websocket = None
@@ -32,11 +32,14 @@ class RoomTranscriptionServer:
         # Initialize RealtimeSTT with a callback for partial results.
         # The final result is handled by the blocking recorder.text() call in a separate thread.
         self.recorder = AudioToTextRecorder(
-            model=whisper_model,
+            model="large-v2",
             language="en",
+            device= "cuda",
+            use_main_model_for_realtime=False,
             silero_sensitivity=0.6,
             webrtc_sensitivity=3,
             post_speech_silence_duration=1.0,
+            silero_use_onnx=True,
             min_length_of_recording=0.5,
             min_gap_between_recordings=0.25,
             enable_realtime_transcription=True,
@@ -197,8 +200,8 @@ async def main():
     parser.add_argument("--room", required=True, help="Room identifier (e.g., 'Hall A')")
     parser.add_argument("--hub-url", default="ws://localhost:9000",
                         help="Central hub WebSocket URL")
-    parser.add_argument("--model", default="base",
-                        choices=["tiny", "base", "small", "medium", "large"],
+    parser.add_argument("--model", default="large-v2",
+                        choices=["tiny", "base", "small", "medium", "large-v2"],
                         help="Whisper model to use")
 
     args = parser.parse_args()
