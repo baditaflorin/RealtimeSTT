@@ -89,7 +89,7 @@ activate_venv() {
 start_hub() {
     local current_ip=$(get_local_ip)
 
-    log_info "Starting Central Hub..."
+    log_info "Starting Central Hub MODIFIED SO YOU KNOW IS NEW..."
     log_info "Auto-detected IP: $current_ip"
     check_venv
     activate_venv
