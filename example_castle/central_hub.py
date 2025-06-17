@@ -281,8 +281,6 @@ DISPLAY_TEMPLATE = """
 </html>
 """
 
-# --- Main Server Logic ---
-
 # --- Flask-SocketIO Routes ---
 @app.route('/')
 def index():

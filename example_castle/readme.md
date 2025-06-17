@@ -8,6 +8,9 @@ RealtimeSTT uses multiprocessing, so **all Python scripts must include** the `if
 ### macOS Microphone Permissions
 On macOS, you'll need to grant microphone permissions to Terminal or your Python IDE when first running the transcription.
 
+### SSL/HTTPS Security
+The system now runs with SSL/HTTPS encryption for secure communications. Self-signed certificates are included for immediate use.
+
 ## 📋 **System Requirements**
 
 ### Central Hub Machine
@@ -24,6 +27,13 @@ On macOS, you'll need to grant microphone permissions to Terminal or your Python
 - **Audio**: Built-in mic or USB audio interface
 - **Network**: WiFi 6 or Ethernet capability
 - **OS**: macOS, Linux (Windows with WSL)
+
+### Mobile Devices (NEW)
+- **Requirements**: Any modern smartphone/tablet with:
+    - Chrome, Safari, or Edge browser
+    - Working microphone
+    - WiFi connection to local network
+    - Web Speech API support (most modern browsers)
 
 ## 🔧 **Installation Steps**
 
@@ -65,20 +75,29 @@ sudo apt install python3-dev portaudio19-dev ffmpeg espeak espeak-data libespeak
 sudo yum install python3-devel portaudio-devel ffmpeg espeak espeak-devel
 ```
 
-### 2. Download Whisper Models (Optional - Auto-downloaded on first use)
+### 2. Pre-Download Models (NEW - Recommended)
+Use the included download script to cache models before deployment:
 ```bash
-# Pre-download models to avoid first-run delays
-python3 -c "
-from faster_whisper import WhisperModel
-print('Downloading base model...')
-WhisperModel('base', device='cpu', compute_type='int8')
-print('Downloading small model...')
-WhisperModel('small', device='cpu', compute_type='int8')
-print('Models downloaded successfully!')
-"
+python3 download_models.py
+
+# This will download:
+# - Whisper models (base, small)
+# - Silero VAD models (standard and ONNX versions)
+# Models are cached in ~/.cache/
 ```
 
-### 3. Network Configuration
+### 3. SSL Certificate Setup (NEW)
+The system includes self-signed SSL certificates for secure communication:
+- `cert.pem` - SSL certificate
+- `key.pem` - Private key
+
+To generate your own certificates:
+```bash
+# Generate a self-signed certificate valid for 1 year
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
+```
+
+### 4. Network Configuration
 
 #### Router Setup (Offline Network)
 ```bash
@@ -94,8 +113,8 @@ DHCP Range: 192.168.100.10 - 192.168.100.50
 
 #### Firewall Rules
 ```bash
-# Allow WebSocket traffic on port 9000
-# Allow Web interface on port 8000
+# Allow WebSocket traffic on port 9000 (now WSS)
+# Allow Web interface on port 8000 (now HTTPS)
 # Allow SSH for remote management (optional)
 ```
 
@@ -108,8 +127,15 @@ DHCP Range: 192.168.100.10 - 192.168.100.50
 mkdir heritage-transcription-hub
 cd heritage-transcription-hub
 
-# Save the central_hub.py script
-# Save the room_stream.py script
+# Copy all required files:
+# - central_hub.py
+# - room_stream.py
+# - cert.pem
+# - key.pem
+# - start_system.sh
+# - download_models.py
+# - templates/mobile.html (create templates directory)
+# - static/mobile_app.js (create static directory)
 ```
 
 #### Start Central Hub:
@@ -121,10 +147,10 @@ python central_hub.py --websocket-port 9000 --web-port 8000
 ./start_system.sh hub
 ```
 
-#### Access web interface:
+#### Access interfaces:
+- **Main Dashboard**: `https://[HUB_IP]:8000` (accept self-signed cert warning)
+- **Mobile Client**: `https://[HUB_IP]:8000/mobile`
 - The system will display the correct URLs when starting
-- Example: `http://192.168.23.231:8000` (your actual IP will be shown)
-- Should see empty room panels waiting for connections
 
 ### 2. Set Up Room Laptops
 
@@ -142,7 +168,7 @@ python3 -c "import pyaudio; print('Audio devices:', [pyaudio.PyAudio().get_devic
 
 #### Start room transcription:
 ```bash
-# The system will auto-detect the hub IP
+# The system will auto-detect the hub IP and use secure WebSocket (WSS)
 # Room 1 (Hall A)
 ./start_system.sh room "Hall A" base
 
@@ -155,6 +181,22 @@ python3 -c "import pyaudio; print('Audio devices:', [pyaudio.PyAudio().get_devic
 # If connecting to a specific hub IP:
 ./start_system.sh room "Hall A" base 192.168.23.231
 ```
+
+### 3. Mobile Device Setup (NEW)
+
+#### Quick Setup:
+1. Connect mobile device to the same network as the hub
+2. Open browser and navigate to: `https://[HUB_IP]:8000/mobile`
+3. Accept the self-signed certificate warning
+4. Enter a room name (e.g., "Mobile Tour Guide")
+5. Hub IP is auto-filled with the current server
+6. Tap "Start Transcribing"
+
+#### Mobile Features:
+- Uses browser's built-in speech recognition (no app install needed)
+- Real-time transcription preview
+- Automatic reconnection handling
+- Works on iOS Safari, Android Chrome, and modern mobile browsers
 
 ## 🎛️ **Configuration Options**
 
@@ -193,9 +235,9 @@ models = {
 # Check system status to see current IP
 ./start_system.sh status
 
-# From room laptop, test central hub connection
+# From room laptop, test central hub connection (now HTTPS)
 ping [HUB_IP_FROM_STATUS]
-curl -I http://[HUB_IP_FROM_STATUS]:8000
+curl -k https://[HUB_IP_FROM_STATUS]:8000  # -k flag for self-signed cert
 ```
 
 ### 2. Audio Input Test
@@ -209,23 +251,82 @@ print('Recording 5 seconds of audio...')
 "
 ```
 
-### 3. End-to-End Test
+### 3. SSL Certificate Test
+```bash
+# Check certificate details
+openssl x509 -in cert.pem -text -noout
+
+# Test secure WebSocket connection
+python3 -c "
+import websockets
+import ssl
+import asyncio
+
+async def test():
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    uri = 'wss://localhost:9000'
+    async with websockets.connect(uri, ssl=ssl_context) as ws:
+        print('SSL connection successful!')
+
+asyncio.run(test())
+"
+```
+
+### 4. Mobile Client Test
+1. Open `https://[HUB_IP]:8000/mobile` on phone
+2. Accept certificate warning
+3. Grant microphone permissions when prompted
+4. Start transcribing and verify text appears on main dashboard
+
+### 5. End-to-End Test
 ```bash
 # Start central hub
 ./start_system.sh hub
-# Note the IP address and web interface URL shown
+# Note the HTTPS URLs shown
 
 # In another terminal, start room server
 ./start_system.sh room "Test Room"
 
-# Speak into microphone
-# Check web interface at the URL shown when hub started
-# Verify transcription appears in real-time
+# On mobile device, access https://[HUB_IP]:8000/mobile
+# Start mobile transcription
+
+# Speak into microphone/phone
+# Check web interface at https://[HUB_IP]:8000
+# Verify transcriptions from both sources appear
 ```
 
 ## 🚨 **Troubleshooting Guide**
 
 ### Common Issues & Solutions
+
+#### "SSL Certificate Warning in Browser"
+```bash
+# This is expected with self-signed certificates
+# Click "Advanced" and "Proceed to site" (Chrome)
+# Or "Show Details" and "visit this website" (Safari)
+# For production, use Let's Encrypt or proper certificates
+```
+
+#### "Mobile Speech Recognition Not Working"
+```bash
+# Check browser compatibility:
+# - iOS: Use Safari 14.5+
+# - Android: Use Chrome 25+
+# - Grant microphone permissions when prompted
+# - Ensure HTTPS connection (required for Web Speech API)
+```
+
+#### "WSS Connection Failed"
+```bash
+# Verify SSL certificates are in place
+ls cert.pem key.pem
+
+# Check if using correct protocol (wss:// not ws://)
+# Ensure firewall allows port 9000
+# Try connecting with certificate verification disabled
+```
 
 #### "No module named 'RealtimeSTT'"
 ```bash
@@ -240,29 +341,13 @@ pip install RealtimeSTT
 # Windows: pip install pyaudio-binary
 ```
 
-#### "Connection refused to central hub"
+#### "Models not loading quickly"
 ```bash
-# Check if central hub is running
-netstat -an | grep 9000
+# Pre-download models using the provided script
+python3 download_models.py
 
-# Check firewall settings
-sudo ufw allow 9000  # Linux
-# macOS: System Preferences > Security & Privacy > Firewall
-```
-
-#### "Poor transcription quality"
-```bash
-# Check microphone levels
-# Increase model size: --model small or --model medium
-# Adjust RealtimeSTT sensitivity settings
-# Verify room acoustics (minimize echo)
-```
-
-#### "High CPU usage"
-```bash
-# Use smaller model: --model tiny or --model base
-# Reduce threads in RealtimeSTT configuration
-# Close unnecessary applications
+# This caches models in ~/.cache/huggingface/hub/
+# and ~/.cache/torch/hub/
 ```
 
 ### Performance Monitoring
@@ -275,6 +360,10 @@ htop  # Linux/macOS
 # Check network traffic
 netstat -i  # Network interface statistics
 iftop       # Real-time network monitoring
+
+# Monitor HTTPS connections
+netstat -an | grep 8000  # Check web connections
+netstat -an | grep 9000  # Check WebSocket connections
 ```
 
 ## 📊 **Expected Performance**
@@ -285,16 +374,18 @@ iftop       # Real-time network monitoring
 - **Network**: <1 Mbps (text-only transmission)
 - **Storage**: 500MB-3GB (model files)
 
+### Mobile Client Performance
+- **CPU Usage**: Minimal (uses browser's native speech API)
+- **Network**: <100 Kbps per device
+- **Battery Impact**: Low-moderate (similar to video call)
+- **Accuracy**: Depends on browser implementation and ambient noise
+
 ### Latency Expectations
 - **Voice Activity Detection**: <100ms
 - **Transcription Processing**: 0.5-2 seconds
 - **Network Transmission**: <50ms local network
+- **Mobile Speech Recognition**: 0.5-1 second
 - **Total End-to-End**: 1-3 seconds
-
-### Battery Life (MacBook Pro)
-- **With power adapter**: Unlimited operation
-- **Battery only**: 6-10 hours (depending on model and usage)
-- **Optimization**: Use base model, reduce screen brightness
 
 ## 💾 **Data Backup & Export**
 
@@ -306,10 +397,50 @@ The system automatically saves:
 
 ### Manual Export
 ```bash
-# Export all transcriptions (replace IP with your hub IP)
-curl http://[HUB_IP]:8000/export > session_export.json
+# Export all transcriptions via HTTPS (note the -k flag for self-signed cert)
+curl -k https://[HUB_IP]:8000/export > session_export.json
 
 # Or use the "Export" button in web interface
 ```
 
-This completes your heritage building transcription system setup. The system will now capture, transcribe, and display speech from multiple rooms in real-time, working completely offline once configured.
+### Data Format
+```json
+{
+  "session_start": "2025-06-17T10:00:00Z",
+  "export_time": "2025-06-17T14:30:00Z",
+  "rooms": {
+    "Hall A": [
+      {
+        "timestamp": "10:15:23",
+        "text": "Welcome to the heritage building tour..."
+      }
+    ],
+    "Mobile Tour Guide": [
+      {
+        "timestamp": "10:16:45", 
+        "text": "And here we see the original architecture..."
+      }
+    ]
+  }
+}
+```
+
+## 🔒 **Security Considerations**
+
+### SSL/TLS Encryption
+- All web traffic uses HTTPS
+- All WebSocket connections use WSS
+- Self-signed certificates included for immediate use
+- For production, replace with proper certificates
+
+### Network Isolation
+- System designed for offline/isolated networks
+- No internet connectivity required after setup
+- All processing happens locally
+
+### Mobile Security
+- No data stored on mobile devices
+- Microphone permissions required only during use
+- All transcriptions sent directly to hub
+
+This completes your enhanced heritage building transcription system setup with SSL security and mobile device support!
