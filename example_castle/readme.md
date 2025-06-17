@@ -444,3 +444,7 @@ curl -k https://[HUB_IP]:8000/export > session_export.json
 - All transcriptions sent directly to hub
 
 This completes your enhanced heritage building transcription system setup with SSL security and mobile device support!
+
+```bash
+codexgigantus --ignore-file chatgpt.txt --ignore-dir heritage-transcription >chatgpt.txt
+```
