@@ -321,7 +321,7 @@ case "${1:-}" in
         start_hub
         ;;
     "room")
-        start_room "$2" "$3"
+        start_room "$2" "$3" "$4"
         ;;
     "install")
         install

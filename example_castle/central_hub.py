@@ -270,17 +270,17 @@ DISPLAY_TEMPLATE = """
             const container = document.getElementById('roomContainer');
             const panel = document.createElement('div');
             panel.className = 'room-panel';
-            panel.id = `room-${roomName.replace(/\\s+/g, '-')}`;
+            panel.id = `room-${roomName.replace(/\s+/g, '-')}`;
             
             panel.innerHTML = `
                 <div class="room-header">
-                    <div class="connection-indicator" id="status-${roomName.replace(/\\s+/g, '-')}"></div>
+                    <div class="connection-indicator" id="status-${roomName.replace(/\s+/g, '-')}"></div>
                     <h2>${roomName}</h2>
-                    <div class="room-status" id="stats-${roomName.replace(/\\s+/g, '-')}">
+                    <div class="room-status" id="stats-${roomName.replace(/\s+/g, '-')}">
                         Waiting for audio...
                     </div>
                 </div>
-                <div class="transcription-area" id="transcriptions-${roomName.replace(/\\s+/g, '-')}">
+                <div class="transcription-area" id="transcriptions-${roomName.replace(/\s+/g, '-')}">
                     <div class="transcription-line">
                         <div class="timestamp">Ready</div>
                         <div class="text">Microphone active, waiting for speech...</div>
@@ -301,7 +301,7 @@ DISPLAY_TEMPLATE = """
         }
         
         function updateRoomStatus(roomName, status) {
-            const statusElement = document.getElementById(`status-${roomName.replace(/\\s+/g, '-')}`);
+            const statusElement = document.getElementById(`status-${roomName.replace(/\s+/g, '-')}`);
             if (statusElement) {
                 statusElement.className = `connection-indicator ${status === 'connected' ? 'connected' : ''}`;
             }
@@ -316,32 +316,45 @@ DISPLAY_TEMPLATE = """
                 return updateTranscription(data); // Retry after creating panel
             }
             
-            // For partial updates, update the last transcription
-            if (data.type === 'partial' && room.lastTranscriptionId === data.id) {
-                const lastLine = room.transcriptionArea.lastElementChild;
-                if (lastLine && lastLine.classList.contains('partial')) {
-                    lastLine.querySelector('.text').textContent = data.text;
-                    return;
+            const transcriptionArea = room.transcriptionArea;
+            let partialLine = transcriptionArea.querySelector('.partial');
+
+            if (data.type === 'partial') {
+                if (partialLine) {
+                    partialLine.querySelector('.text').textContent = data.text;
+                } else {
+                    const line = document.createElement('div');
+                    line.className = 'transcription-line partial';
+                    line.id = `transcription-${data.id}`;
+                    line.innerHTML = `
+                        <div class="timestamp">${new Date(data.timestamp * 1000).toLocaleTimeString()}</div>
+                        <div class="text">${data.text}</div>
+                    `;
+                    transcriptionArea.appendChild(line);
+                }
+            } else if (data.type === 'final') {
+                if (partialLine && partialLine.id === `transcription-${data.id}`) {
+                    // This final transcription corresponds to the current partial line
+                    partialLine.classList.remove('partial');
+                    partialLine.querySelector('.text').textContent = data.text;
+                } else {
+                    // This is a new final transcription without a preceding partial
+                    if (partialLine) partialLine.remove(); // remove stale partial line
+                    const line = document.createElement('div');
+                    line.className = 'transcription-line final';
+                    line.id = `transcription-${data.id}`;
+                    line.innerHTML = `
+                        <div class="timestamp">${new Date(data.timestamp * 1000).toLocaleTimeString()}</div>
+                        <div class="text">${data.text}</div>
+                    `;
+                    transcriptionArea.appendChild(line);
                 }
             }
             
-            // Create new transcription line
-            const line = document.createElement('div');
-            line.className = `transcription-line ${data.type}`;
-            line.innerHTML = `
-                <div class="timestamp">${new Date(data.timestamp * 1000).toLocaleTimeString()}</div>
-                <div class="text">${data.text}</div>
-            `;
-            
-            room.transcriptionArea.appendChild(line);
-            room.transcriptionArea.scrollTop = room.transcriptionArea.scrollHeight;
-            
-            if (data.type === 'final') {
-                room.lastTranscriptionId = data.id;
-            }
+            transcriptionArea.scrollTop = transcriptionArea.scrollHeight;
             
             // Update room stats
-            const statsElement = document.getElementById(`stats-${roomName.replace(/\\s+/g, '-')}`);
+            const statsElement = document.getElementById(`stats-${roomName.replace(/\s+/g, '-')}`);
             if (statsElement) {
                 if (data.type === 'final') {
                     statsElement.textContent = `Last: ${new Date(data.timestamp * 1000).toLocaleTimeString()}`;
@@ -414,12 +427,14 @@ class CentralHub:
     async def handle_room_connection(self, websocket, path):
         """Handle WebSocket connections from room servers"""
         client_address = websocket.remote_address
-        logger.info(f"Room server connected from {client_address}")
+        room_name = None
+        logger.info(f"Room server connecting from {client_address}...")
 
         try:
             async for message in websocket:
                 try:
                     data = json.loads(message)
+                    room_name = data.get('room') # Keep track of the room name
                     await self.process_room_message(data)
                 except json.JSONDecodeError:
                     logger.error(f"Invalid JSON received: {message}")
@@ -430,11 +445,22 @@ class CentralHub:
             logger.info(f"Room server {client_address} disconnected")
         except Exception as e:
             logger.error(f"Error in room connection: {e}")
+        finally:
+            # Ensure disconnection is handled if room_name was identified
+            if room_name:
+                await self.process_room_message({
+                    'type': 'disconnection',
+                    'room': room_name
+                })
+
 
     async def process_room_message(self, data):
         """Process messages from room servers"""
         message_type = data.get('type')
         room_name = data.get('room')
+
+        if not room_name:
+            return
 
         if message_type == 'connection':
             connected_rooms[room_name] = {
@@ -442,8 +468,8 @@ class CentralHub:
                 'last_seen': time.time(),
                 'status': 'connected'
             }
-            transcription_history[room_name] = []
-            room_stats[room_name] = {'total_transcriptions': 0}
+            transcription_history.setdefault(room_name, [])
+            room_stats.setdefault(room_name, {'total_transcriptions': 0})
 
             # Notify web interface
             socketio.emit('room_connected', {'room': room_name})
@@ -459,6 +485,10 @@ class CentralHub:
             # Update room last seen
             if room_name in connected_rooms:
                 connected_rooms[room_name]['last_seen'] = time.time()
+                if connected_rooms[room_name]['status'] == 'disconnected':
+                    connected_rooms[room_name]['status'] = 'connected'
+                    socketio.emit('room_connected', {'room': room_name})
+
 
             # Store transcription
             if message_type == 'final':
@@ -470,7 +500,7 @@ class CentralHub:
 
             # Log for debugging
             if message_type == 'final':
-                logger.info(f"[{room_name}] {data.get('text', '')}")
+                logger.info(f"[{room_name}] Final: {data.get('text', '')}")
 
     def start_websocket_server(self):
         """Start the WebSocket server for room connections"""
@@ -485,7 +515,9 @@ class CentralHub:
 
         # Run WebSocket server in a separate thread
         def start_async_server():
-            asyncio.new_event_loop().run_until_complete(run_websocket_server())
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(run_websocket_server())
 
         websocket_thread = threading.Thread(target=start_async_server, daemon=True)
         websocket_thread.start()
@@ -504,7 +536,8 @@ class CentralHub:
                     emit('room_connected', {'room': room_name})
 
         logger.info(f"Starting web server on port {self.web_port}")
-        socketio.run(app, host='0.0.0.0', port=self.web_port, debug=False)
+        # Allow unsafe Werkzeug for seamless auto-reloading if needed during dev
+        socketio.run(app, host='0.0.0.0', port=self.web_port, debug=False, allow_unsafe_werkzeug=True)
 
 def main():
     import argparse

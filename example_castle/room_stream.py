@@ -9,14 +9,13 @@ import websockets
 import json
 import time
 import argparse
-import queue
 import threading
 from datetime import datetime
 from RealtimeSTT import AudioToTextRecorder
 import logging
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class RoomTranscriptionServer:
@@ -25,37 +24,69 @@ class RoomTranscriptionServer:
         self.central_hub_url = central_hub_url
         self.websocket = None
         self.is_connected = False
+        self.loop = None  # To store the main event loop
+        self.shutdown_event = threading.Event() # Use a thread-safe event
+        self.transcription_counter = 0
 
-        # Initialize RealtimeSTT
+        # Initialize RealtimeSTT with a callback for partial results.
+        # The final result is handled by the blocking recorder.text() call in a separate thread.
         self.recorder = AudioToTextRecorder(
             model=whisper_model,
             language="en",
-            silero_sensitivity=0.6,  # Adjust based on room acoustics
-            webrtc_sensitivity=3,    # Good for heritage building acoustics
-            post_speech_silence_duration=1.0,  # Quick response
-            min_length_of_recording=1.0,
+            silero_sensitivity=0.6,
+            webrtc_sensitivity=3,
+            post_speech_silence_duration=1.0,
+            min_length_of_recording=0.5,
             min_gap_between_recordings=0.25,
             enable_realtime_transcription=True,
-            realtime_processing_pause=0.1,
-            on_realtime_transcription_update=self.on_partial_transcription
+            on_realtime_transcription_update=self.on_partial_transcription,
+            realtime_processing_pause=0.2,
         )
 
-        # Track transcription state
-        self.current_transcription = ""
-        self.transcription_counter = 0
+    def on_partial_transcription(self, text):
+        """ Callback for partial transcription results (from a background thread) """
+        if not text.strip() or not self.loop or self.shutdown_event.is_set():
+            return
+
+        logger.debug(f"Partial transcription: {text}")
+        payload = {
+            "type": "partial",
+            "room": self.room_name,
+            "text": text.strip(),
+            "timestamp": time.time(),
+            "id": self.transcription_counter + 1
+        }
+        asyncio.run_coroutine_threadsafe(self.send_to_hub(payload), self.loop)
+
+    def on_final_transcription(self, text):
+        """ Callback for final transcription results (from a background thread) """
+        if not text.strip() or not self.loop or self.shutdown_event.is_set():
+            return
+
+        self.transcription_counter += 1
+        logger.info(f"[{self.room_name}] Final: {text}")
+        payload = {
+            "type": "final",
+            "room": self.room_name,
+            "text": text.strip(),
+            "timestamp": time.time(),
+            "id": self.transcription_counter,
+            "confidence": 0.95
+        }
+        asyncio.run_coroutine_threadsafe(self.send_to_hub(payload), self.loop)
 
     async def connect_to_hub(self):
         """Connect to central hub with retry logic"""
-        max_retries = 5
+        max_retries = 10
         retry_delay = 2
 
         for attempt in range(max_retries):
+            if self.shutdown_event.is_set(): return False
             try:
                 self.websocket = await websockets.connect(self.central_hub_url)
                 self.is_connected = True
                 logger.info(f"Connected to central hub at {self.central_hub_url}")
 
-                # Send initial connection message
                 await self.send_to_hub({
                     "type": "connection",
                     "room": self.room_name,
@@ -65,143 +96,83 @@ class RoomTranscriptionServer:
                 return True
 
             except Exception as e:
-                logger.warning(f"Connection attempt {attempt + 1} failed: {e}")
+                logger.warning(f"Connection attempt {attempt + 1}/{max_retries} failed: {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
+                    retry_delay = min(retry_delay * 2, 30)
 
-        logger.error("Failed to connect to central hub after all retries")
+        logger.error("Failed to connect to central hub. Running in offline mode.")
+        self.is_connected = False
         return False
 
     async def send_to_hub(self, data):
         """Send data to central hub with error handling"""
         if not self.is_connected or not self.websocket:
-            logger.warning("Not connected to hub, storing transcription locally")
             self.store_locally(data)
             return
 
         try:
             await self.websocket.send(json.dumps(data))
         except websockets.exceptions.ConnectionClosed:
-            logger.warning("Connection to hub lost, attempting reconnect...")
+            logger.warning("Connection to hub lost. Will attempt to reconnect on next message.")
             self.is_connected = False
-            await self.connect_to_hub()
+            self.store_locally(data)
         except Exception as e:
             logger.error(f"Error sending to hub: {e}")
             self.store_locally(data)
 
     def store_locally(self, data):
         """Store transcription locally as backup"""
-        filename = f"{self.room_name}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-        with open(filename, 'a') as f:
-            f.write(json.dumps(data) + '\n')
+        filename = f"{self.room_name}_backup_{datetime.now().strftime('%Y%m%d')}.jsonl"
+        try:
+            with open(filename, 'a') as f:
+                f.write(json.dumps(data) + '\n')
+        except Exception as e:
+            logger.error(f"Failed to store transcription locally: {e}")
 
-    def on_partial_transcription(self, text):
-        """Handle real-time transcription updates"""
-        self.current_transcription = text
-        # Send partial updates for live display
-        asyncio.create_task(self.send_to_hub({
-            "type": "partial",
-            "room": self.room_name,
-            "text": text,
-            "timestamp": time.time(),
-            "id": self.transcription_counter
-        }))
+    def transcription_worker(self):
+        """Worker thread to handle blocking transcription calls."""
+        try:
+            with self.recorder:
+                while not self.shutdown_event.is_set():
+                    try:
+                        self.recorder.text(self.on_final_transcription)
+                    except Exception as e:
+                        if not self.shutdown_event.is_set():
+                            logger.error(f"Error in transcription worker: {e}", exc_info=True)
+                        break
+        except Exception as e:
+            if not self.shutdown_event.is_set():
+                logger.error(f"AudioToTextRecorder failed to start: {e}", exc_info=True)
 
     async def start_transcription(self):
-        """Start the transcription service"""
+        """Start the transcription service and keep it running."""
+        self.loop = asyncio.get_running_loop()
         logger.info(f"Starting transcription for room: {self.room_name}")
 
-        # Connect to central hub
-        if not await self.connect_to_hub():
-            logger.warning("Proceeding in offline mode")
+        await self.connect_to_hub()
 
-        logger.info(f"Room {self.room_name} transcription service started")
+        logger.info(f"Room '{self.room_name}' transcription service started.")
         logger.info("Speak into the microphone. Press Ctrl+C to stop.")
 
-        # Create a queue for communication between threads
-        import queue
-        import threading
-
-        self.transcription_queue = queue.Queue()
-
-        def transcription_worker():
-            """Worker thread for RealtimeSTT"""
-            try:
-                def process_final_text(text):
-                    if text.strip():  # Only process non-empty transcriptions
-                        self.transcription_counter += 1
-                        logger.info(f"[{self.room_name}] Final: {text}")
-
-                        # Put transcription in queue for async processing
-                        self.transcription_queue.put({
-                            "type": "final",
-                            "room": self.room_name,
-                            "text": text.strip(),
-                            "timestamp": time.time(),
-                            "id": self.transcription_counter,
-                            "confidence": 0.9
-                        })
-
-                # Start continuous transcription
-                with self.recorder:
-                    while True:
-                        try:
-                            self.recorder.text(process_final_text)
-                        except Exception as e:
-                            logger.error(f"Transcription error: {e}")
-                            break
-
-            except Exception as e:
-                logger.error(f"Worker thread error: {e}")
-
-        # Start transcription worker thread
-        worker_thread = threading.Thread(target=transcription_worker, daemon=True)
+        worker_thread = threading.Thread(target=self.transcription_worker, daemon=True)
         worker_thread.start()
 
-        try:
-            # Main async loop - process transcriptions from queue
-            while True:
-                try:
-                    # Check for new transcriptions (non-blocking)
-                    transcription = self.transcription_queue.get_nowait()
-                    await self.send_to_hub(transcription)
-                except queue.Empty:
-                    # No new transcriptions, continue
-                    pass
-                except Exception as e:
-                    logger.error(f"Error processing transcription: {e}")
-
-                # Check connection health
-                if self.is_connected and self.websocket:
-                    try:
-                        pong = await self.websocket.ping()
-                        await asyncio.wait_for(pong, timeout=5)
-                    except:
-                        logger.warning("Hub connection lost, attempting reconnect...")
-                        self.is_connected = False
-                        await self.connect_to_hub()
-
-                # Small delay to prevent busy loop
-                await asyncio.sleep(0.1)
-
-        except KeyboardInterrupt:
-            logger.info("Shutdown requested by user.")
-            await self.shutdown()
+        while worker_thread.is_alive() and not self.shutdown_event.is_set():
+            await asyncio.sleep(0.5)
 
     async def shutdown(self):
         """Clean shutdown"""
+        if self.shutdown_event.is_set():
+            return
+
         logger.info("Shutting down transcription service...")
+        self.shutdown_event.set()
 
-        # Stop recorder
-        try:
-            if hasattr(self.recorder, 'shutdown'):
-                self.recorder.shutdown()
-        except Exception as e:
-            logger.warning(f"Error shutting down recorder: {e}")
+        # Give the recorder a moment to release the microphone
+        await asyncio.sleep(0.5)
 
-        # Close WebSocket connection
-        if self.websocket:
+        if self.is_connected and self.websocket:
             try:
                 await self.send_to_hub({
                     "type": "disconnection",
@@ -211,30 +182,35 @@ class RoomTranscriptionServer:
                 })
                 await self.websocket.close()
             except Exception as e:
-                logger.warning(f"Error closing websocket: {e}")
-
+                logger.warning(f"Error during websocket close: {e}")
         logger.info("Shutdown complete.")
 
 async def main():
     parser = argparse.ArgumentParser(description="Room transcription server")
     parser.add_argument("--room", required=True, help="Room identifier (e.g., 'Hall A')")
     parser.add_argument("--hub-url", default="ws://localhost:9000",
-                        help="Central hub WebSocket URL (default: ws://localhost:9000)")
+                        help="Central hub WebSocket URL")
     parser.add_argument("--model", default="base",
                         choices=["tiny", "base", "small", "medium", "large"],
                         help="Whisper model to use")
 
     args = parser.parse_args()
 
-    # Create and start transcription server
     server = RoomTranscriptionServer(
         room_name=args.room,
         central_hub_url=args.hub_url,
         whisper_model=args.model
     )
 
-    await server.start_transcription()
+    try:
+        await server.start_transcription()
+    except KeyboardInterrupt:
+        logger.info("User requested shutdown.")
+    finally:
+        await server.shutdown()
 
 if __name__ == "__main__":
-    # Required for RealtimeSTT multiprocessing
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Application terminated by user.")
