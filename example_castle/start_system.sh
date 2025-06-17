@@ -120,7 +120,7 @@ start_room() {
     local model="${2:-base}"
     local custom_hub_ip="$3"
     local hub_ip="${custom_hub_ip:-$HUB_IP}"
-    local hub_url="ws://$hub_ip:$HUB_WS_PORT"
+    local hub_url="wss://$hub_ip:$HUB_WS_PORT"
 
     if [ -z "$room_name" ]; then
         log_error "Room name is required!"

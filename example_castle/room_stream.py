@@ -8,6 +8,7 @@ import asyncio
 import websockets
 import json
 import time
+import ssl
 import argparse
 import threading
 from datetime import datetime
@@ -80,10 +81,16 @@ class RoomTranscriptionServer:
         max_retries = 10
         retry_delay = 2
 
+        # Create an SSL context that does not verify the certificate
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
         for attempt in range(max_retries):
             if self.shutdown_event.is_set(): return False
             try:
-                self.websocket = await websockets.connect(self.central_hub_url)
+                # Pass the custom SSL context to the connect call
+                self.websocket = await websockets.connect(self.central_hub_url, ssl=ssl_context)
                 self.is_connected = True
                 logger.info(f"Connected to central hub at {self.central_hub_url}")
 
